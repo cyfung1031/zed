@@ -10,6 +10,8 @@ on:
       source_repo:
         description: "Repository to import from"
         required: true
+        default: "cyfung1031/gpui-component"
+      source_ref:
         description: "Branch, tag, or SHA from source repo to import"
         required: true
         default: "main"
@@ -37,6 +39,14 @@ jobs:
           ref: ${{ inputs.zed_ref }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show selected inputs
+        run: |
+          echo "zed_ref=${{ inputs.zed_ref }}"
+          echo "source_repo=${{ inputs.source_repo }}"
+          echo "source_ref=${{ inputs.source_ref }}"
+          echo "target_branch=${{ inputs.target_branch }}"
+          echo "modified_branch=${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
 
       - name: Configure git identity
         run: |
