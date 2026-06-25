@@ -253,6 +253,11 @@ members = [
     "tooling/compliance",
     "tooling/perf",
     "tooling/xtask",
+    "crates/gpui_component_macros",
+    "crates/gpui_component_story_web",
+    "crates/gpui_component_assets",
+    "crates/gpui_component",
+    "crates/gpui_component_story",
 ]
 default-members = ["crates/zed"]
 
@@ -847,8 +852,11 @@ yaml-rust2 = "0.8"
 yawc = "0.2.5"
 zeroize = "1.8"
 zstd = "0.11"
-
-
+gpui-component-macros = { path = "crates/gpui_component_macros" }
+gpui-component-story-web = { path = "crates/gpui_component_story_web" }
+gpui-component-assets = { path = "crates/gpui_component_assets" }
+gpui-component = { path = "crates/gpui_component" }
+gpui-component-story = { path = "crates/gpui_component_story" }
 [workspace.dependencies.windows]
 version = "0.61"
 features = [
