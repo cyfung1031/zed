@@ -17,12 +17,12 @@ pub fn run() -> Result<(), JsValue> {
     tracing_wasm::set_as_global_default();
 
     #[cfg(target_family = "wasm")]
-    gpui_platform::web_init();
+    gpui::gpui_platform::web_init();
     #[cfg(not(target_family = "wasm"))]
-    let app = gpui_platform::application();
+    let app = gpui::gpui_platform::application();
     #[cfg(target_family = "wasm")]
     let app = {
-        let app = gpui_platform::single_threaded_web();
+        let app = gpui::gpui_platform::single_threaded_web();
 
         // Temporary fix: intentionally leak the `Rc<AppCell>` to keep the application alive
         struct WasmApplication(std::rc::Rc<AppCell>);
