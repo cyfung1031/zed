@@ -7,18 +7,22 @@ on:
         description: "Branch, tag, or SHA of this zed fork to use as the base"
         required: true
         default: "main"
+
       source_repo:
         description: "Repository to import from"
         required: true
         default: "cyfung1031/gpui-component"
+
       source_ref:
         description: "Branch, tag, or SHA from source repo to import"
         required: true
         default: "main"
+
       target_branch:
         description: "Branch to create/update with the plain import"
         required: true
         default: "generated"
+
       modified_suffix:
         description: "Suffix for the modified branch"
         required: true
