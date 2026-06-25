@@ -277,7 +277,7 @@ type Listener = Box<dyn FnMut(&dyn Any, &mut App) -> bool + 'static>;
 pub(crate) type KeystrokeObserver =
     Box<dyn FnMut(&KeystrokeEvent, &mut Window, &mut App) -> bool + 'static>;
 type QuitHandler = Box<dyn FnOnce(&mut App) -> LocalBoxFuture<'static, ()> + 'static>;
-type WindowClosedHandler = Box<dyn FnMut(&mut App, WindowId)>;
+type WindowClosedHandler = Box<dyn FnMut(&mut App, Option<WindowId>)>;
 type ReleaseListener = Box<dyn FnOnce(&mut dyn Any, &mut App) + 'static>;
 type NewEntityListener = Box<dyn FnMut(AnyEntity, &mut Option<&mut Window>, &mut App) + 'static>;
 
@@ -2166,7 +2166,7 @@ impl App {
     /// The window is no longer accessible at the point this callback is invoked.
     pub fn on_window_closed(
         &self,
-        mut on_closed: impl FnMut(&mut App, WindowId) + 'static,
+        mut on_closed: impl FnMut(&mut App, Option<WindowId>) + 'static,
     ) -> Subscription {
         let (subscription, activate) = self.window_closed_observers.insert((), Box::new(on_closed));
         activate();
