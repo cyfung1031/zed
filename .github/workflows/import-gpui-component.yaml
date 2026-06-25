@@ -226,6 +226,7 @@ jobs:
         run: |
           from pathlib import Path
           import json
+          import os
           import re
           import tomllib
 
@@ -288,6 +289,8 @@ jobs:
 
           imported_packages = set(crates.keys())
 
+          # These remain workspace deps because they are imported into Zed root
+          # or handled later by the gpui_facade step.
           keep_workspace = imported_packages | {
               "gpui",
               "gpui_platform",
@@ -296,6 +299,7 @@ jobs:
               "story",
           }
 
+          # Map every local Zed package name to its local crate directory.
           local_packages = {}
 
           for cargo_toml in Path("crates").glob("*/Cargo.toml"):
@@ -305,11 +309,10 @@ jobs:
                   continue
 
               name = data.get("package", {}).get("name")
-
               if name:
-                  local_packages[name] = cargo_toml.parent.as_posix()
+                  local_packages[name] = cargo_toml.parent
 
-          def rewrite_zed_git_dependency_to_local(entry: str) -> str:
+          def rewrite_zed_git_dependency_to_local_for_manifest(entry: str, manifest: Path) -> str:
               if "github.com/zed-industries/" not in entry:
                   return entry
 
@@ -324,9 +327,14 @@ jobs:
               package_name = package_match.group(1) if package_match else dep_name
 
               local_path = local_packages.get(package_name)
+
               if not local_path:
                   print(f"No local package for {dep_name} / {package_name}; keeping source dependency.")
                   return entry
+
+              # Cargo paths are relative to the manifest containing the dependency.
+              relative_path = os.path.relpath(local_path, manifest.parent)
+              relative_path = relative_path.replace(os.sep, "/")
 
               preserved = []
 
@@ -345,19 +353,17 @@ jobs:
               if optional_match:
                   preserved.append(f"optional = {optional_match.group(1)}")
 
-              parts = [f'path = "{local_path}"'] + preserved
+              parts = [f'path = "{relative_path}"'] + preserved
               rewritten = f'{dep_name} = {{ ' + ", ".join(parts) + " }"
 
-              print(f"Rewrote source dependency {dep_name}: zed-industries git -> {local_path}")
+              print(f"Rewrote {dep_name} for {manifest}: zed-industries git -> {relative_path}")
               return rewritten
 
-          replacement_deps = {}
-
-          for name, entry in source_deps.items():
-              if name in keep_workspace:
-                  continue
-
-              replacement_deps[name] = rewrite_zed_git_dependency_to_local(entry)
+          source_dep_names = [
+              name
+              for name in source_deps.keys()
+              if name not in keep_workspace
+          ]
 
           def replace_workspace_dep_line(text: str, dep_name: str, replacement: str) -> str:
               text = re.sub(
@@ -381,7 +387,12 @@ jobs:
                   text = cargo_toml.read_text()
                   original = text
 
-                  for dep_name, replacement in replacement_deps.items():
+                  for dep_name in source_dep_names:
+                      source_entry = source_deps[dep_name]
+                      replacement = rewrite_zed_git_dependency_to_local_for_manifest(
+                          source_entry,
+                          cargo_toml,
+                      )
                       text = replace_workspace_dep_line(text, dep_name, replacement)
 
                   if text != original:
