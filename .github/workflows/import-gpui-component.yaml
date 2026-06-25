@@ -45,7 +45,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity
+        shell: bash
         run: |
+          set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -214,7 +217,7 @@ jobs:
               additions = []
 
               for name, value in deps_to_add.items():
-                  if not re.search(rf'(?m)^{re.escape(name)}\s*=', section):
+                  if not re.search(rf'(?m)^\s*{re.escape(name)}\s*=', section):
                       additions.append(f'{name} = {value}')
 
               if additions:
@@ -223,7 +226,7 @@ jobs:
 
           root.write_text(text)
 
-      - name: Copy missing source workspace dependencies into zed root
+      - name: Copy gpui-component root workspace dependencies into zed root
         shell: python
         run: |
           from pathlib import Path
@@ -233,73 +236,55 @@ jobs:
           target_root = Path("Cargo.toml")
 
           if not source_root.exists():
-              print("No source root Cargo.toml found; skipping.")
-              raise SystemExit(0)
+              raise SystemExit("Missing _gpui_component_source/Cargo.toml")
 
           source_text = source_root.read_text()
           target_text = target_root.read_text()
 
-          source_section_match = re.search(
-              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
-              source_text,
-          )
+          def extract_section(text: str, section_name: str) -> str:
+              match = re.search(
+                  rf'(?ms)^\[{re.escape(section_name)}\]\s*(.*?)(?=^\[|\Z)',
+                  text,
+              )
+              return match.group(1) if match else ""
 
-          if not source_section_match:
-              print("No [workspace.dependencies] in source root; skipping.")
-              raise SystemExit(0)
+          def ensure_section(text: str, section_name: str) -> str:
+              if not re.search(rf'(?m)^\[{re.escape(section_name)}\]\s*$', text):
+                  text = text.rstrip() + f"\n\n[{section_name}]\n"
+              return text
 
-          source_section = source_section_match.group(1)
-
-          if "[workspace.dependencies]" not in target_text:
-              target_text += "\n[workspace.dependencies]\n"
-
-          target_section_match = re.search(
-              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
-              target_text,
-          )
-
-          target_section = target_section_match.group(0)
-
-          skip = {
-              "gpui",
-              "gpui-component",
-              "gpui-component-assets",
-              "gpui-component-macros",
-              "gpui-component-story",
-              "gpui-component-story-web",
-              "gpui_platform",
-              "gpui_macros",
-              "gpui_web",
-          }
-
-          def collect_dependency_entries(section: str):
+          def parse_dependency_entries(section: str):
               entries = []
               current = []
-
-              brace_depth = 0
-              bracket_depth = 0
+              depth_curly = 0
+              depth_square = 0
 
               for raw_line in section.splitlines():
                   line = raw_line.rstrip()
 
-                  if not line.strip() or line.strip().startswith("#"):
-                      continue
-
                   if not current:
-                      if not re.match(r'^\s*[A-Za-z0-9_\-]+\s*=', line):
+                      stripped = line.strip()
+
+                      if not stripped:
+                          continue
+
+                      if stripped.startswith("#"):
+                          continue
+
+                      if not re.match(r'^[A-Za-z0-9_\-]+\s*=', stripped):
                           continue
 
                   current.append(line)
 
                   code = line.split("#", 1)[0]
-                  brace_depth += code.count("{") - code.count("}")
-                  bracket_depth += code.count("[") - code.count("]")
+                  depth_curly += code.count("{") - code.count("}")
+                  depth_square += code.count("[") - code.count("]")
 
-                  if brace_depth <= 0 and bracket_depth <= 0:
+                  if depth_curly <= 0 and depth_square <= 0:
                       entry = "\n".join(current)
                       current = []
-                      brace_depth = 0
-                      bracket_depth = 0
+                      depth_curly = 0
+                      depth_square = 0
 
                       match = re.match(r'^\s*([A-Za-z0-9_\-]+)\s*=', entry)
                       if match:
@@ -307,33 +292,73 @@ jobs:
 
               return entries
 
+          source_deps_section = extract_section(source_text, "workspace.dependencies")
+
+          if not source_deps_section:
+              raise SystemExit("Source repo has no [workspace.dependencies]")
+
+          target_text = ensure_section(target_text, "workspace.dependencies")
+
+          target_deps_match = re.search(
+              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
+              target_text,
+          )
+
+          if not target_deps_match:
+              raise SystemExit("Could not locate target [workspace.dependencies]")
+
+          target_deps_full = target_deps_match.group(0)
+
+          # Do not copy the imported local packages or gpui itself.
+          # The gpui dependency is handled separately in gpui-component as local gpui_facade.
+          skip = {
+              "gpui",
+              "gpui-component",
+              "gpui-component-assets",
+              "gpui-component-macros",
+              "gpui-component-story",
+              "gpui-component-story-web",
+              "story",
+          }
+
           additions = []
 
-          for name, entry in collect_dependency_entries(source_section):
+          for name, entry in parse_dependency_entries(source_deps_section):
               if name in skip:
                   continue
 
-              if re.search(rf'(?m)^\s*{re.escape(name)}\s*=', target_section):
+              already_exists = re.search(
+                  rf'(?m)^\s*{re.escape(name)}\s*=',
+                  target_deps_full,
+              )
+
+              if already_exists:
+                  print(f"Keeping existing zed workspace dependency: {name}")
                   continue
 
               additions.append(entry)
 
           if additions:
-              new_target_section = target_section.rstrip() + "\n" + "\n".join(additions) + "\n"
+              new_target_deps_full = (
+                  target_deps_full.rstrip()
+                  + "\n"
+                  + "\n".join(additions)
+                  + "\n"
+              )
+
               target_text = (
-                  target_text[:target_section_match.start()]
-                  + new_target_section
-                  + target_text[target_section_match.end():]
+                  target_text[:target_deps_match.start()]
+                  + new_target_deps_full
+                  + target_text[target_deps_match.end():]
               )
 
               target_root.write_text(target_text)
 
-              print("Copied missing workspace dependencies:")
-              for item in additions:
-                  first_line = item.splitlines()[0]
-                  print(f"  {first_line}")
+              print("Copied gpui-component workspace dependencies into zed root:")
+              for entry in additions:
+                  print("  " + entry.splitlines()[0])
           else:
-              print("No missing workspace dependencies to copy.")
+              print("No missing gpui-component workspace dependencies to copy.")
 
       - name: Remove nested workspace metadata from imported crates
         shell: python
@@ -390,13 +415,13 @@ jobs:
               text = cargo_toml.read_text()
 
               text = re.sub(
-                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*\{{[^\n]*\}}',
+                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*\{{[^\n]*\}}\s*$',
                   f'{crate_name}.workspace = true',
                   text,
               )
 
               text = re.sub(
-                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*"[^"]+"',
+                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*"[^"]+"\s*$',
                   f'{crate_name}.workspace = true',
                   text,
               )
@@ -410,7 +435,7 @@ jobs:
                   for package in packages_to_patch:
                       patch_dependency_to_workspace(cargo_toml, package)
 
-      - name: Force gpui-component to use gpui_facade package
+      - name: Force gpui-component to use local gpui_facade package
         shell: python
         run: |
           from pathlib import Path
@@ -425,34 +450,32 @@ jobs:
 
           replacement = 'gpui = { package = "gpui_facade", path = "../gpui_facade", features = ["gpui_macos", "gpui_web", "gpui_macros", "font-kit", "x11", "wayland", "runtime_shaders"] }'
 
-          # Replace any normal gpui dependency form inside the manifest.
+          # Remove any existing gpui dependency line.
           text = re.sub(
-              r'(?m)^\s*gpui\.workspace\s*=\s*true\s*$',
-              replacement,
+              r'(?m)^\s*gpui\.workspace\s*=\s*true\s*$\n?',
+              '',
               text,
           )
 
           text = re.sub(
-              r'(?m)^\s*gpui\s*=\s*"[^"]+"\s*$',
-              replacement,
+              r'(?m)^\s*gpui\s*=\s*"[^"]+"\s*$\n?',
+              '',
               text,
           )
 
           text = re.sub(
-              r'(?m)^\s*gpui\s*=\s*\{[^\n]*\}\s*$',
-              replacement,
+              r'(?m)^\s*gpui\s*=\s*\{[^\n]*\}\s*$\n?',
+              '',
               text,
           )
 
-          # If gpui was not present under [dependencies], add it.
-          if replacement not in text:
-              dependencies_match = re.search(r'(?m)^\[dependencies\]\s*$', text)
+          dependencies_match = re.search(r'(?m)^\[dependencies\]\s*$', text)
 
-              if not dependencies_match:
-                  text += "\n[dependencies]\n" + replacement + "\n"
-              else:
-                  insert_at = dependencies_match.end()
-                  text = text[:insert_at] + "\n" + replacement + text[insert_at:]
+          if not dependencies_match:
+              text += "\n[dependencies]\n" + replacement + "\n"
+          else:
+              insert_at = dependencies_match.end()
+              text = text[:insert_at] + "\n" + replacement + text[insert_at:]
 
           cargo_toml.write_text(text)
 
