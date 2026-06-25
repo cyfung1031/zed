@@ -197,7 +197,7 @@ pub fn init(cx: &mut App) {
         // Safety: the web examples run single-threaded; the client is
         // created and used exclusively on the main thread.
         let http_client = unsafe {
-            gpui_web::FetchHttpClient::with_user_agent("gpui-component/story")
+            gpui::gpui_web::FetchHttpClient::with_user_agent("gpui-component/story")
                 .expect("failed to create FetchHttpClient")
         };
         cx.set_http_client(std::sync::Arc::new(http_client));
