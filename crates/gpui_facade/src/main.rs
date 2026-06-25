@@ -1,20 +1,17 @@
-//! Combined GPUI facade crate.
-//!
-//! This crate re-exports the public `gpui` API and additionally exposes
-//! `gpui_platform` under the same crate namespace, so downstream code can use:
-//!
-//! ```ignore
-//! use gpui_combined as gpui;
-//!
-//! let app = gpui::gpui_platform::application();
-//! ```
-//!
-//! It intentionally does not modify the original `gpui` crate, avoiding the
-//! dependency cycle `gpui -> gpui_platform -> gpui`.
+#![doc = "Facade crate that re-exports GPUI plus platform/web helpers."]
 
 pub use gpui::*;
+pub use gpui_macros::*;
+pub use gpui_web::*;
 
-/// Re-export of the `gpui_platform` convenience crate.
 pub mod gpui_platform {
     pub use ::gpui_platform::*;
+}
+
+pub mod gpui_macros {
+    pub use ::gpui_macros::*;
+}
+
+pub mod gpui_web {
+    pub use ::gpui_web::*;
 }

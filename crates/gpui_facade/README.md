@@ -1,41 +1,19 @@
-# gpui_combined
+# gpui_facade
 
-Facade crate that re-exports all public items from `gpui` and also exposes
-`gpui_platform` as a nested module.
+A small facade crate that re-exports `gpui`, `gpui_macros`, `gpui_web`, and exposes `gpui_platform` under `gpui_facade::gpui_platform`.
+
+This avoids making the real `gpui` crate depend on `gpui_platform`, so it does not introduce a dependency cycle.
+
+Example:
 
 ```rust
-use gpui_combined as gpui;
+use gpui_facade as gpui;
 
 let app = gpui::gpui_platform::application();
 ```
 
-## Workspace setup
-
-Add this crate to the root `Cargo.toml` workspace members:
+You can also depend on it under the crate name `gpui` from another crate:
 
 ```toml
-[workspace]
-members = [
-    # ...
-    "crates/gpui_combined",
-]
-```
-
-Add it to `[workspace.dependencies]` if you want other crates to depend on it
-via `workspace = true`:
-
-```toml
-gpui_combined = { path = "crates/gpui_combined" }
-```
-
-To let a downstream crate keep using the name `gpui`, depend on it like this:
-
-```toml
-gpui = { package = "gpui_combined", workspace = true }
-```
-
-or directly by path:
-
-```toml
-gpui = { package = "gpui_combined", path = "../gpui_combined" }
+gpui = { package = "gpui_facade", workspace = true }
 ```

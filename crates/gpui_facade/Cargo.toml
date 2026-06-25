@@ -15,7 +15,7 @@ path = "src/main.rs"
 default = ["font-kit", "wayland", "x11", "windows-manifest"]
 test-support = ["gpui/test-support", "gpui_platform/test-support"]
 bench = ["gpui/bench"]
-inspector = ["gpui/inspector"]
+inspector = ["gpui/inspector", "gpui_macros/inspector"]
 leak-detection = ["gpui/leak-detection"]
 wayland = ["gpui/wayland", "gpui_platform/wayland"]
 x11 = ["gpui/x11", "gpui_platform/x11"]
@@ -28,4 +28,6 @@ runtime_shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
 gpui.workspace = true
+gpui_macros.workspace = true
 gpui_platform.workspace = true
+gpui_web.workspace = true
