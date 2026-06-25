@@ -58,7 +58,6 @@ jobs:
           set -euo pipefail
 
           TARGET_BRANCH="${{ inputs.target_branch }}"
-
           git checkout -B "$TARGET_BRANCH"
 
       - name: Checkout gpui-component source
@@ -226,7 +225,7 @@ jobs:
 
           root.write_text(text)
 
-      - name: Copy gpui-component root workspace dependencies into zed root
+      - name: Copy and merge gpui-component root workspace dependencies into zed root
         shell: python
         run: |
           from pathlib import Path
@@ -241,34 +240,39 @@ jobs:
           source_text = source_root.read_text()
           target_text = target_root.read_text()
 
-          def extract_section(text: str, section_name: str) -> str:
+          def extract_section_bounds(text: str, section_name: str):
               match = re.search(
                   rf'(?ms)^\[{re.escape(section_name)}\]\s*(.*?)(?=^\[|\Z)',
                   text,
               )
-              return match.group(1) if match else ""
+              if not match:
+                  return None
+              return match.start(), match.end(), match.group(0), match.group(1)
 
           def ensure_section(text: str, section_name: str) -> str:
               if not re.search(rf'(?m)^\[{re.escape(section_name)}\]\s*$', text):
                   text = text.rstrip() + f"\n\n[{section_name}]\n"
               return text
 
-          def parse_dependency_entries(section: str):
-              entries = []
+          def parse_dependency_entries(section_full: str):
+              lines = section_full.splitlines()
+              entries = {}
+              order = []
+
               current = []
               depth_curly = 0
               depth_square = 0
 
-              for raw_line in section.splitlines():
+              for raw_line in lines:
                   line = raw_line.rstrip()
+
+                  if line.strip().startswith("["):
+                      continue
 
                   if not current:
                       stripped = line.strip()
 
-                      if not stripped:
-                          continue
-
-                      if stripped.startswith("#"):
+                      if not stripped or stripped.startswith("#"):
                           continue
 
                       if not re.match(r'^[A-Za-z0-9_\-]+\s*=', stripped):
@@ -288,29 +292,113 @@ jobs:
 
                       match = re.match(r'^\s*([A-Za-z0-9_\-]+)\s*=', entry)
                       if match:
-                          entries.append((match.group(1), entry))
+                          name = match.group(1)
+                          entries[name] = entry
+                          order.append(name)
 
-              return entries
+              return entries, order
 
-          source_deps_section = extract_section(source_text, "workspace.dependencies")
+          def extract_features(entry: str):
+              match = re.search(r'features\s*=\s*\[([^\]]*)\]', entry, re.S)
+              if not match:
+                  return []
 
-          if not source_deps_section:
+              body = match.group(1)
+              return re.findall(r'"([^"]+)"', body)
+
+          def has_default_features_false(entry: str) -> bool:
+              return bool(re.search(r'default-features\s*=\s*false', entry))
+
+          def is_table_dependency(entry: str) -> bool:
+              return bool(re.match(r'^\s*[A-Za-z0-9_\-]+\s*=\s*\{', entry, re.S))
+
+          def simple_to_table(entry: str) -> str:
+              match = re.match(r'^\s*([A-Za-z0-9_\-]+)\s*=\s*"([^"]+)"\s*$', entry)
+              if not match:
+                  return entry
+
+              name, version = match.group(1), match.group(2)
+              return f'{name} = {{ version = "{version}" }}'
+
+          def merge_features_into_entry(target_entry: str, source_features):
+              if not source_features:
+                  return target_entry
+
+              target_entry = simple_to_table(target_entry)
+              existing_features = extract_features(target_entry)
+
+              merged = []
+              for feature in existing_features + source_features:
+                  if feature not in merged:
+                      merged.append(feature)
+
+              features_text = "features = [" + ", ".join(f'"{feature}"' for feature in merged) + "]"
+
+              if re.search(r'features\s*=\s*\[[^\]]*\]', target_entry, re.S):
+                  return re.sub(
+                      r'features\s*=\s*\[[^\]]*\]',
+                      features_text,
+                      target_entry,
+                      flags=re.S,
+                  )
+
+              if is_table_dependency(target_entry):
+                  return re.sub(
+                      r'\}\s*$',
+                      f', {features_text} }}',
+                      target_entry,
+                      flags=re.S,
+                  )
+
+              return target_entry
+
+          def merge_default_features_false(target_entry: str, source_entry: str):
+              if not has_default_features_false(source_entry):
+                  return target_entry
+
+              target_entry = simple_to_table(target_entry)
+
+              if re.search(r'default-features\s*=', target_entry):
+                  return re.sub(
+                      r'default-features\s*=\s*(true|false)',
+                      'default-features = false',
+                      target_entry,
+                  )
+
+              if is_table_dependency(target_entry):
+                  return re.sub(
+                      r'\}\s*$',
+                      ', default-features = false }',
+                      target_entry,
+                      flags=re.S,
+                  )
+
+              return target_entry
+
+          def merge_entry(target_entry: str, source_entry: str):
+              merged = target_entry
+              merged = merge_features_into_entry(merged, extract_features(source_entry))
+              merged = merge_default_features_false(merged, source_entry)
+              return merged
+
+          source_bounds = extract_section_bounds(source_text, "workspace.dependencies")
+          if not source_bounds:
               raise SystemExit("Source repo has no [workspace.dependencies]")
+
+          _, _, source_section_full, _ = source_bounds
+          source_entries, source_order = parse_dependency_entries(source_section_full)
 
           target_text = ensure_section(target_text, "workspace.dependencies")
 
-          target_deps_match = re.search(
-              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
-              target_text,
-          )
-
-          if not target_deps_match:
+          target_bounds = extract_section_bounds(target_text, "workspace.dependencies")
+          if not target_bounds:
               raise SystemExit("Could not locate target [workspace.dependencies]")
 
-          target_deps_full = target_deps_match.group(0)
+          target_start, target_end, target_section_full, _ = target_bounds
+          target_entries, target_order = parse_dependency_entries(target_section_full)
 
-          # Do not copy the imported local packages or gpui itself.
-          # The gpui dependency is handled separately in gpui-component as local gpui_facade.
+          # Do not copy/merge these from the source repo.
+          # gpui is handled separately as a local gpui_facade dependency in gpui-component.
           skip = {
               "gpui",
               "gpui-component",
@@ -321,44 +409,125 @@ jobs:
               "story",
           }
 
+          changed = False
           additions = []
+          replacements = {}
 
-          for name, entry in parse_dependency_entries(source_deps_section):
+          for name in source_order:
               if name in skip:
                   continue
 
-              already_exists = re.search(
-                  rf'(?m)^\s*{re.escape(name)}\s*=',
-                  target_deps_full,
-              )
+              source_entry = source_entries[name]
 
-              if already_exists:
-                  print(f"Keeping existing zed workspace dependency: {name}")
+              if name not in target_entries:
+                  additions.append(source_entry)
+                  changed = True
                   continue
 
-              additions.append(entry)
+              target_entry = target_entries[name]
+              merged_entry = merge_entry(target_entry, source_entry)
+
+              if merged_entry != target_entry:
+                  replacements[name] = merged_entry
+                  changed = True
+
+          new_target_section = target_section_full
+
+          for name, merged_entry in replacements.items():
+              old_entry = target_entries[name]
+              new_target_section = new_target_section.replace(old_entry, merged_entry)
 
           if additions:
-              new_target_deps_full = (
-                  target_deps_full.rstrip()
-                  + "\n"
-                  + "\n".join(additions)
-                  + "\n"
-              )
+              new_target_section = new_target_section.rstrip() + "\n" + "\n".join(additions) + "\n"
 
-              target_text = (
-                  target_text[:target_deps_match.start()]
-                  + new_target_deps_full
-                  + target_text[target_deps_match.end():]
-              )
-
+          if changed:
+              target_text = target_text[:target_start] + new_target_section + target_text[target_end:]
               target_root.write_text(target_text)
 
-              print("Copied gpui-component workspace dependencies into zed root:")
-              for entry in additions:
-                  print("  " + entry.splitlines()[0])
+              if additions:
+                  print("Copied missing workspace dependencies:")
+                  for entry in additions:
+                      print("  " + entry.splitlines()[0])
+
+              if replacements:
+                  print("Merged source workspace dependency options into existing zed dependencies:")
+                  for name in replacements:
+                      print(f"  {name}")
           else:
-              print("No missing gpui-component workspace dependencies to copy.")
+              print("No workspace dependency additions or merges needed.")
+
+      - name: Rewrite zed-industries git workspace dependencies to local sibling paths
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import tomllib
+
+          root = Path("Cargo.toml")
+          text = root.read_text()
+
+          crates_dir = Path("crates")
+
+          local_packages = {}
+
+          for cargo_toml in crates_dir.glob("*/Cargo.toml"):
+              try:
+                  data = tomllib.loads(cargo_toml.read_text())
+              except Exception:
+                  continue
+
+              package = data.get("package", {})
+              name = package.get("name")
+
+              if name:
+                  local_packages[name] = cargo_toml.parent.as_posix()
+
+          def rewrite_entry(match):
+              dep_name = match.group("name")
+              body = match.group("body")
+
+              if "github.com/zed-industries/" not in body:
+                  return match.group(0)
+
+              package_match = re.search(r'package\s*=\s*"([^"]+)"', body)
+              package_name = package_match.group(1) if package_match else dep_name
+
+              local_path = local_packages.get(package_name)
+
+              if not local_path:
+                  print(f"No local sibling crate found for {dep_name} / package {package_name}; keeping git dependency.")
+                  return match.group(0)
+
+              preserved = []
+
+              if package_name != dep_name:
+                  preserved.append(f'package = "{package_name}"')
+
+              features_match = re.search(r'features\s*=\s*\[([^\]]*)\]', body, re.S)
+              if features_match:
+                  preserved.append("features = [" + features_match.group(1).strip() + "]")
+
+              default_features_match = re.search(r'default-features\s*=\s*(true|false)', body)
+              if default_features_match:
+                  preserved.append(f"default-features = {default_features_match.group(1)}")
+
+              optional_match = re.search(r'optional\s*=\s*(true|false)', body)
+              if optional_match:
+                  preserved.append(f"optional = {optional_match.group(1)}")
+
+              parts = [f'path = "{local_path}"'] + preserved
+              rewritten = f'{dep_name} = {{ ' + ", ".join(parts) + " }"
+
+              print(f"Rewrote {dep_name}: zed-industries git dependency -> {local_path}")
+              return rewritten
+
+          text = re.sub(
+              r'(?m)^(?P<name>[A-Za-z0-9_\-]+)\s*=\s*\{(?P<body>[^\n]*github\.com/zed-industries/[^\n]*)\}\s*$',
+              rewrite_entry,
+              text,
+          )
+
+          root.write_text(text)
 
       - name: Remove nested workspace metadata from imported crates
         shell: python
@@ -450,7 +619,6 @@ jobs:
 
           replacement = 'gpui = { package = "gpui_facade", path = "../gpui_facade", features = ["gpui_macos", "gpui_web", "gpui_macros", "font-kit", "x11", "wayland", "runtime_shaders"] }'
 
-          # Remove any existing gpui dependency line.
           text = re.sub(
               r'(?m)^\s*gpui\.workspace\s*=\s*true\s*$\n?',
               '',
@@ -516,7 +684,6 @@ jobs:
           set -euo pipefail
 
           MODIFIED_BRANCH="${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
-
           git checkout -B "$MODIFIED_BRANCH"
 
       - name: Apply gpui-unofficial-style modifications
@@ -647,5 +814,4 @@ jobs:
           set -euo pipefail
 
           MODIFIED_BRANCH="${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
-
           git push --force-with-lease origin "$MODIFIED_BRANCH"
