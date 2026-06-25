@@ -12,7 +12,6 @@ default = ["tree-sitter"]
 [dependencies]
 anyhow = "1"
 gpui.workspace = true
-gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 
@@ -38,9 +37,6 @@ reqwest_client = { path = "../reqwest_client" }
 smol = "2"
 tree-sitter-navi = "0.2.3"
 color-lsp = "0.2.0"
-
-[target.'cfg(target_family = "wasm")'.dependencies]
-gpui_web.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18" }
