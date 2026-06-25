@@ -75,7 +75,7 @@ mod visual_test_context;
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Temporary(?) wrapper around [`RefCell<App>`] to help us debug any double borrows.
-/// Strongly consider removing after stabilization.
+/// Strongly consider removing after stabilization. 
 #[doc(hidden)]
 pub struct AppCell {
     app: RefCell<App>,
