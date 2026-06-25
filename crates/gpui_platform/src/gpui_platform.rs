@@ -1,7 +1,6 @@
 //! Convenience crate that re-exports GPUI's platform traits and the
 //! `current_platform` constructor so consumers don't need `#[cfg]` gating.
 
-pub use gpui::*;
 pub use gpui::Platform;
 
 use std::rc::Rc;
