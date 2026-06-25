@@ -1,0 +1,497 @@
+name: Import gpui-component
+
+on:
+  workflow_dispatch:
+    inputs:
+      zed_ref:
+        description: "Branch, tag, or SHA of this zed fork to use as the base"
+        required: true
+        default: "main"
+
+      source_repo:
+        description: "Repository to import from"
+        required: true
+        default: "cyfung1031/gpui-component"
+
+      source_ref:
+        description: "Branch, tag, or SHA from source repo to import"
+        required: true
+        default: "main"
+
+      target_branch:
+        description: "Branch to create/update with the plain import"
+        required: true
+        default: "generated"
+
+      modified_suffix:
+        description: "Suffix for the modified branch"
+        required: true
+        default: "-modified"
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    name: Import gpui-component into Zed workspace
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout zed fork
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.zed_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show selected inputs
+        run: |
+          echo "zed_ref=${{ inputs.zed_ref }}"
+          echo "source_repo=${{ inputs.source_repo }}"
+          echo "source_ref=${{ inputs.source_ref }}"
+          echo "target_branch=${{ inputs.target_branch }}"
+          echo "modified_branch=${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create target branch from selected zed ref
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+
+          git checkout -B "$TARGET_BRANCH"
+
+      - name: Checkout gpui-component source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.source_ref }}
+          path: _gpui_component_source
+          fetch-depth: 1
+
+      - name: Detect source crates
+        id: detect
+        shell: python
+        run: |
+          from pathlib import Path
+          import tomllib
+          import json
+
+          src = Path("_gpui_component_source")
+
+          package_to_target = {
+              "gpui-component": "crates/gpui_component",
+              "gpui-component-assets": "crates/gpui_component_assets",
+              "gpui-component-macros": "crates/gpui_component_macros",
+              "gpui-component-story": "crates/gpui_component_story",
+              "gpui-component-story-web": "crates/gpui_component_story_web",
+          }
+
+          found = {}
+
+          for cargo_toml in src.rglob("Cargo.toml"):
+              if "target" in cargo_toml.parts:
+                  continue
+
+              try:
+                  data = tomllib.loads(cargo_toml.read_text())
+              except Exception:
+                  continue
+
+              package = data.get("package", {})
+              name = package.get("name")
+
+              if name in package_to_target:
+                  found[name] = {
+                      "source": str(cargo_toml.parent),
+                      "target": package_to_target[name],
+                  }
+
+          if "gpui-component" not in found:
+              print("Could not find package name gpui-component")
+              print("Cargo.toml files found:")
+              for cargo_toml in src.rglob("Cargo.toml"):
+                  print(f"  {cargo_toml}")
+              raise SystemExit(1)
+
+          output = Path(__import__("os").environ["GITHUB_OUTPUT"])
+          with output.open("a") as f:
+              f.write(f"crates_json={json.dumps(found)}\n")
+
+          print(json.dumps(found, indent=2))
+
+      - name: Import crates into zed/crates
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import os
+          import shutil
+
+          crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
+
+          Path("crates").mkdir(exist_ok=True)
+
+          for package, item in crates.items():
+              source = Path(item["source"])
+              target = Path(item["target"])
+
+              if target.exists():
+                  shutil.rmtree(target)
+
+              shutil.copytree(
+                  source,
+                  target,
+                  ignore=shutil.ignore_patterns(
+                      ".git",
+                      "target",
+                      ".DS_Store",
+                  ),
+              )
+
+              print(f"Imported {package}: {source} -> {target}")
+
+      - name: Patch root workspace Cargo.toml
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import re
+
+          crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
+
+          root = Path("Cargo.toml")
+          text = root.read_text()
+
+          members_to_add = [
+              item["target"]
+              for item in crates.values()
+              if Path(item["target"]).exists()
+          ]
+
+          workspace_match = re.search(r'(?m)^\[workspace\]\s*$', text)
+
+          if not workspace_match:
+              text += "\n[workspace]\n"
+
+          members_match = re.search(r'(?ms)^members\s*=\s*\[(.*?)\]', text)
+
+          if members_match:
+              block = members_match.group(0)
+              inner = members_match.group(1)
+              existing_members = set(re.findall(r'"([^"]+)"', inner))
+
+              additions = []
+              for member in members_to_add:
+                  if member not in existing_members:
+                      additions.append(f'    "{member}",')
+
+              if additions:
+                  new_block = block[:-1].rstrip() + "\n" + "\n".join(additions) + "\n]"
+                  text = text[:members_match.start()] + new_block + text[members_match.end():]
+          else:
+              workspace_match = re.search(r'(?m)^\[workspace\]\s*$', text)
+              insert_at = workspace_match.end()
+
+              member_lines = "\n\nmembers = [\n"
+              for member in members_to_add:
+                  member_lines += f'    "{member}",\n'
+              member_lines += "]\n"
+
+              text = text[:insert_at] + member_lines + text[insert_at:]
+
+          if "[workspace.dependencies]" not in text:
+              text += "\n[workspace.dependencies]\n"
+
+          dep_section = re.search(
+              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
+              text,
+          )
+
+          deps_to_add = {
+              package: f'{{ path = "{item["target"]}" }}'
+              for package, item in crates.items()
+              if Path(item["target"]).exists()
+          }
+
+          if dep_section:
+              section = dep_section.group(0)
+              additions = []
+
+              for name, value in deps_to_add.items():
+                  if not re.search(rf'(?m)^{re.escape(name)}\s*=', section):
+                      additions.append(f'{name} = {value}')
+
+              if additions:
+                  new_section = section.rstrip() + "\n" + "\n".join(additions) + "\n"
+                  text = text[:dep_section.start()] + new_section + text[dep_section.end():]
+
+          root.write_text(text)
+
+      - name: Remove nested workspace metadata from imported crates
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import re
+
+          crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
+
+          for item in crates.values():
+              toml = Path(item["target"]) / "Cargo.toml"
+
+              if not toml.exists():
+                  continue
+
+              text = toml.read_text()
+
+              text = re.sub(
+                  r'(?ms)^\[workspace\]\s*.*?(?=^\[|\Z)',
+                  '',
+                  text,
+              )
+
+              text = re.sub(
+                  r'(?ms)^\[workspace\.dependencies\]\s*.*?(?=^\[|\Z)',
+                  '',
+                  text,
+              )
+
+              toml.write_text(text)
+
+      - name: Patch imported dependencies to workspace dependencies
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import re
+
+          crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
+
+          imported_packages = set(crates.keys())
+
+          # These are provided by the zed fork workspace.
+          zed_workspace_packages = {
+              "gpui",
+              "gpui_platform",
+              "gpui_macros",
+              "gpui_web",
+          }
+
+          packages_to_patch = imported_packages | zed_workspace_packages
+
+          def patch_dependency_to_workspace(cargo_toml: Path, crate_name: str):
+              text = cargo_toml.read_text()
+
+              # Replace:
+              # crate = { git = "...", ... }
+              # crate = { path = "...", ... }
+              # crate = { version = "...", ... }
+              text = re.sub(
+                  rf'(?m)^{re.escape(crate_name)}\s*=\s*\{{[^\n]*\}}',
+                  f'{crate_name}.workspace = true',
+                  text,
+              )
+
+              # Replace:
+              # crate = "..."
+              text = re.sub(
+                  rf'(?m)^{re.escape(crate_name)}\s*=\s*"[^"]+"',
+                  f'{crate_name}.workspace = true',
+                  text,
+              )
+
+              cargo_toml.write_text(text)
+
+          for item in crates.values():
+              target = Path(item["target"])
+
+              for cargo_toml in target.rglob("Cargo.toml"):
+                  for package in packages_to_patch:
+                      patch_dependency_to_workspace(cargo_toml, package)
+
+      - name: Validate plain import
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo metadata --no-deps
+
+      - name: Commit plain import
+        id: import_commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add Cargo.toml crates/gpui_component*
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No plain import changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Import gpui-component into workspace"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push plain import branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git push --force-with-lease origin "${{ inputs.target_branch }}"
+
+      - name: Create modified branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODIFIED_BRANCH="${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
+
+          git checkout -B "$MODIFIED_BRANCH"
+
+      - name: Apply required modifications
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+          import re
+
+          crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
+
+          imported_roots = [
+              Path(item["target"])
+              for item in crates.values()
+              if Path(item["target"]).exists()
+          ]
+
+          text_extensions = {
+              ".rs",
+              ".toml",
+              ".md",
+              ".mdx",
+              ".txt",
+              ".ron",
+              ".json",
+              ".yml",
+              ".yaml",
+          }
+
+          def is_text_file(path: Path) -> bool:
+              return path.suffix in text_extensions
+
+          # This mirrors the required changes:
+          # - gpui_platform:: -> gpui::gpui_platform::
+          # - gpui_web::      -> gpui::gpui_web::
+          # - gpui_macros::   -> gpui::gpui_macros::
+          for root in imported_roots:
+              for path in root.rglob("*"):
+                  if not path.is_file():
+                      continue
+
+                  if not is_text_file(path):
+                      continue
+
+                  try:
+                      text = path.read_text()
+                  except UnicodeDecodeError:
+                      continue
+
+                  original = text
+
+                  text = text.replace("gpui_platform::", "gpui::gpui_platform::")
+                  text = text.replace("gpui_web::", "gpui::gpui_web::")
+                  text = text.replace("gpui_macros::", "gpui::gpui_macros::")
+
+                  if text != original:
+                      path.write_text(text)
+
+          def remove_direct_split_crate_deps(cargo_toml: Path):
+              text = cargo_toml.read_text()
+              original = text
+
+              # Remove direct dependencies that should now be reached through gpui.
+              for dep in ["gpui_platform", "gpui_web", "gpui_macros"]:
+                  text = re.sub(
+                      rf'(?m)^\s*{re.escape(dep)}\.workspace\s*=\s*true\s*\n',
+                      '',
+                      text,
+                  )
+
+                  text = re.sub(
+                      rf'(?m)^\s*{re.escape(dep)}\s*=\s*\{{[^\n]*\}}\s*\n',
+                      '',
+                      text,
+                  )
+
+                  text = re.sub(
+                      rf'(?m)^\s*{re.escape(dep)}\s*=\s*"[^"]+"\s*\n',
+                      '',
+                      text,
+                  )
+
+              # Match the feature edit from the compare:
+              # inspector = ["gpui_macros/inspector", "gpui/inspector"]
+              # becomes:
+              # inspector = ["gpui/inspector"]
+              text = text.replace(
+                  'inspector = ["gpui_macros/inspector", "gpui/inspector"]',
+                  'inspector = ["gpui/inspector"]',
+              )
+
+              text = text.replace(
+                  'inspector = ["gpui/inspector", "gpui_macros/inspector"]',
+                  'inspector = ["gpui/inspector"]',
+              )
+
+              # Remove empty target dependency tables created by removing gpui_web.
+              text = re.sub(
+                  r"(?ms)^\[target\.'cfg\(target_family = \"wasm\"\)'\.dependencies\]\s*(?=^\[|\Z)",
+                  "",
+                  text,
+              )
+
+              if text != original:
+                  cargo_toml.write_text(text)
+
+          for root in imported_roots:
+              for cargo_toml in root.rglob("Cargo.toml"):
+                  remove_direct_split_crate_deps(cargo_toml)
+
+      - name: Validate modified branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo metadata --no-deps
+
+      - name: Commit modified branch
+        id: modified_commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add Cargo.toml crates/gpui_component*
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No modified changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Apply gpui-component workspace modifications"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push modified branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODIFIED_BRANCH="${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
+
+          git push --force-with-lease origin "$MODIFIED_BRANCH"
