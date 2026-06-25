@@ -410,6 +410,52 @@ jobs:
                   for package in packages_to_patch:
                       patch_dependency_to_workspace(cargo_toml, package)
 
+      - name: Force gpui-component to use gpui_facade package
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          cargo_toml = Path("crates/gpui_component/Cargo.toml")
+
+          if not cargo_toml.exists():
+              raise SystemExit("crates/gpui_component/Cargo.toml not found")
+
+          text = cargo_toml.read_text()
+
+          replacement = 'gpui = { package = "gpui_facade", workspace = true, features = ["gpui_macos", "gpui_web", "gpui_macros", "font-kit", "x11", "wayland", "runtime_shaders"] }'
+
+          # Replace any normal gpui dependency form inside the manifest.
+          text = re.sub(
+              r'(?m)^\s*gpui\.workspace\s*=\s*true\s*$',
+              replacement,
+              text,
+          )
+
+          text = re.sub(
+              r'(?m)^\s*gpui\s*=\s*"[^"]+"\s*$',
+              replacement,
+              text,
+          )
+
+          text = re.sub(
+              r'(?m)^\s*gpui\s*=\s*\{[^\n]*\}\s*$',
+              replacement,
+              text,
+          )
+
+          # If gpui was not present under [dependencies], add it.
+          if replacement not in text:
+              dependencies_match = re.search(r'(?m)^\[dependencies\]\s*$', text)
+
+              if not dependencies_match:
+                  text += "\n[dependencies]\n" + replacement + "\n"
+              else:
+                  insert_at = dependencies_match.end()
+                  text = text[:insert_at] + "\n" + replacement + text[insert_at:]
+
+          cargo_toml.write_text(text)
+
       - name: Validate plain import
         shell: bash
         run: |
