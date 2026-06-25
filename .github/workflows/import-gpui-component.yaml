@@ -1,6 +1,6 @@
 name: Import gpui-component
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       zed_ref:
@@ -44,14 +44,6 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Show selected inputs
-        run: |
-          echo "zed_ref=${{ inputs.zed_ref }}"
-          echo "source_repo=${{ inputs.source_repo }}"
-          echo "source_ref=${{ inputs.source_ref }}"
-          echo "target_branch=${{ inputs.target_branch }}"
-          echo "modified_branch=${{ inputs.target_branch }}${{ inputs.modified_suffix }}"
-
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
@@ -81,6 +73,7 @@ jobs:
           from pathlib import Path
           import tomllib
           import json
+          import os
 
           src = Path("_gpui_component_source")
 
@@ -119,7 +112,7 @@ jobs:
                   print(f"  {cargo_toml}")
               raise SystemExit(1)
 
-          output = Path(__import__("os").environ["GITHUB_OUTPUT"])
+          output = Path(os.environ["GITHUB_OUTPUT"])
           with output.open("a") as f:
               f.write(f"crates_json={json.dumps(found)}\n")
 
@@ -130,7 +123,6 @@ jobs:
         run: |
           from pathlib import Path
           import json
-          import os
           import shutil
 
           crates = json.loads(r'''${{ steps.detect.outputs.crates_json }}''')
@@ -174,9 +166,7 @@ jobs:
               if Path(item["target"]).exists()
           ]
 
-          workspace_match = re.search(r'(?m)^\[workspace\]\s*$', text)
-
-          if not workspace_match:
+          if not re.search(r'(?m)^\[workspace\]\s*$', text):
               text += "\n[workspace]\n"
 
           members_match = re.search(r'(?ms)^members\s*=\s*\[(.*?)\]', text)
@@ -233,6 +223,118 @@ jobs:
 
           root.write_text(text)
 
+      - name: Copy missing source workspace dependencies into zed root
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          source_root = Path("_gpui_component_source/Cargo.toml")
+          target_root = Path("Cargo.toml")
+
+          if not source_root.exists():
+              print("No source root Cargo.toml found; skipping.")
+              raise SystemExit(0)
+
+          source_text = source_root.read_text()
+          target_text = target_root.read_text()
+
+          source_section_match = re.search(
+              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
+              source_text,
+          )
+
+          if not source_section_match:
+              print("No [workspace.dependencies] in source root; skipping.")
+              raise SystemExit(0)
+
+          source_section = source_section_match.group(1)
+
+          if "[workspace.dependencies]" not in target_text:
+              target_text += "\n[workspace.dependencies]\n"
+
+          target_section_match = re.search(
+              r'(?ms)^\[workspace\.dependencies\]\s*(.*?)(?=^\[|\Z)',
+              target_text,
+          )
+
+          target_section = target_section_match.group(0)
+
+          skip = {
+              "gpui",
+              "gpui-component",
+              "gpui-component-assets",
+              "gpui-component-macros",
+              "gpui-component-story",
+              "gpui-component-story-web",
+              "gpui_platform",
+              "gpui_macros",
+              "gpui_web",
+          }
+
+          def collect_dependency_entries(section: str):
+              entries = []
+              current = []
+
+              brace_depth = 0
+              bracket_depth = 0
+
+              for raw_line in section.splitlines():
+                  line = raw_line.rstrip()
+
+                  if not line.strip() or line.strip().startswith("#"):
+                      continue
+
+                  if not current:
+                      if not re.match(r'^\s*[A-Za-z0-9_\-]+\s*=', line):
+                          continue
+
+                  current.append(line)
+
+                  code = line.split("#", 1)[0]
+                  brace_depth += code.count("{") - code.count("}")
+                  bracket_depth += code.count("[") - code.count("]")
+
+                  if brace_depth <= 0 and bracket_depth <= 0:
+                      entry = "\n".join(current)
+                      current = []
+                      brace_depth = 0
+                      bracket_depth = 0
+
+                      match = re.match(r'^\s*([A-Za-z0-9_\-]+)\s*=', entry)
+                      if match:
+                          entries.append((match.group(1), entry))
+
+              return entries
+
+          additions = []
+
+          for name, entry in collect_dependency_entries(source_section):
+              if name in skip:
+                  continue
+
+              if re.search(rf'(?m)^\s*{re.escape(name)}\s*=', target_section):
+                  continue
+
+              additions.append(entry)
+
+          if additions:
+              new_target_section = target_section.rstrip() + "\n" + "\n".join(additions) + "\n"
+              target_text = (
+                  target_text[:target_section_match.start()]
+                  + new_target_section
+                  + target_text[target_section_match.end():]
+              )
+
+              target_root.write_text(target_text)
+
+              print("Copied missing workspace dependencies:")
+              for item in additions:
+                  first_line = item.splitlines()[0]
+                  print(f"  {first_line}")
+          else:
+              print("No missing workspace dependencies to copy.")
+
       - name: Remove nested workspace metadata from imported crates
         shell: python
         run: |
@@ -275,7 +377,6 @@ jobs:
 
           imported_packages = set(crates.keys())
 
-          # These are provided by the zed fork workspace.
           zed_workspace_packages = {
               "gpui",
               "gpui_platform",
@@ -288,20 +389,14 @@ jobs:
           def patch_dependency_to_workspace(cargo_toml: Path, crate_name: str):
               text = cargo_toml.read_text()
 
-              # Replace:
-              # crate = { git = "...", ... }
-              # crate = { path = "...", ... }
-              # crate = { version = "...", ... }
               text = re.sub(
-                  rf'(?m)^{re.escape(crate_name)}\s*=\s*\{{[^\n]*\}}',
+                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*\{{[^\n]*\}}',
                   f'{crate_name}.workspace = true',
                   text,
               )
 
-              # Replace:
-              # crate = "..."
               text = re.sub(
-                  rf'(?m)^{re.escape(crate_name)}\s*=\s*"[^"]+"',
+                  rf'(?m)^\s*{re.escape(crate_name)}\s*=\s*"[^"]+"',
                   f'{crate_name}.workspace = true',
                   text,
               )
@@ -355,7 +450,7 @@ jobs:
 
           git checkout -B "$MODIFIED_BRANCH"
 
-      - name: Apply required modifications
+      - name: Apply gpui-unofficial-style modifications
         shell: python
         run: |
           from pathlib import Path
@@ -385,10 +480,6 @@ jobs:
           def is_text_file(path: Path) -> bool:
               return path.suffix in text_extensions
 
-          # This mirrors the required changes:
-          # - gpui_platform:: -> gpui::gpui_platform::
-          # - gpui_web::      -> gpui::gpui_web::
-          # - gpui_macros::   -> gpui::gpui_macros::
           for root in imported_roots:
               for path in root.rglob("*"):
                   if not path.is_file():
@@ -415,7 +506,6 @@ jobs:
               text = cargo_toml.read_text()
               original = text
 
-              # Remove direct dependencies that should now be reached through gpui.
               for dep in ["gpui_platform", "gpui_web", "gpui_macros"]:
                   text = re.sub(
                       rf'(?m)^\s*{re.escape(dep)}\.workspace\s*=\s*true\s*\n',
@@ -435,10 +525,6 @@ jobs:
                       text,
                   )
 
-              # Match the feature edit from the compare:
-              # inspector = ["gpui_macros/inspector", "gpui/inspector"]
-              # becomes:
-              # inspector = ["gpui/inspector"]
               text = text.replace(
                   'inspector = ["gpui_macros/inspector", "gpui/inspector"]',
                   'inspector = ["gpui/inspector"]',
@@ -449,7 +535,6 @@ jobs:
                   'inspector = ["gpui/inspector"]',
               )
 
-              # Remove empty target dependency tables created by removing gpui_web.
               text = re.sub(
                   r"(?ms)^\[target\.'cfg\(target_family = \"wasm\"\)'\.dependencies\]\s*(?=^\[|\Z)",
                   "",
