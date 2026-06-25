@@ -423,7 +423,7 @@ jobs:
 
           text = cargo_toml.read_text()
 
-          replacement = 'gpui = { package = "gpui_facade", workspace = true, features = ["gpui_macos", "gpui_web", "gpui_macros", "font-kit", "x11", "wayland", "runtime_shaders"] }'
+          replacement = 'gpui = { package = "gpui_facade", path = "../gpui_facade", features = ["gpui_macos", "gpui_web", "gpui_macros", "font-kit", "x11", "wayland", "runtime_shaders"] }'
 
           # Replace any normal gpui dependency form inside the manifest.
           text = re.sub(
