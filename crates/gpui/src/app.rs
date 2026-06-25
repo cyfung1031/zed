@@ -139,32 +139,6 @@ impl Drop for AppRefMut<'_> {
     }
 }
 
-pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
-    #[cfg(target_os = "macos")]
-    {
-        Rc::new(gpui_macos::MacPlatform::new(headless))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Rc::new(
-            gpui_windows::WindowsPlatform::new(headless)
-                .expect("failed to initialize Windows platform"),
-        )
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        gpui_linux::current_platform(headless)
-    }
-
-    #[cfg(target_family = "wasm")]
-    {
-        let _ = headless;
-        Rc::new(gpui_web::WebPlatform::new(true))
-    }
-}
-
 /// A reference to a GPUI application, typically constructed in the `main` function of your app.
 /// You won't interact with this type much outside of initial configuration and startup.
 pub struct Application(Rc<AppCell>);
@@ -172,16 +146,6 @@ pub struct Application(Rc<AppCell>);
 /// Represents an application before it is fully launched. Once your app is
 /// configured, you'll start the app with `App::run`.
 impl Application {
-
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self::with_platform(current_platform(false))
-    }
-
-    pub fn headless() -> Self {
-        Self::with_platform(current_platform(true))
-    }
-
     /// Builds an app with a caller-provided platform implementation.
     pub fn with_platform(platform: Rc<dyn Platform>) -> Self {
         Self(App::new_app(
